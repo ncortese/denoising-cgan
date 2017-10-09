@@ -1,17 +1,16 @@
 import tensorflow as tf
 import nn_construction as nnc
 import numpy as np
-
-# debug
-from tensorflow.examples.tutorials.mnist import input_data
-mnist = input_data.read_data_sets('MNIST_data', one_hot=True)
+from batch_loader import BatchLoader
+from PIL import Image
+import os
 
 # parameters
 batch_size = 20
-num_steps = 10000
-image_height = 28
-image_width = 28
-image_channels = 1
+num_steps = 1000
+image_height = 8
+image_width = 8
+image_channels = 3
 image_size = image_height*image_width
 activation = tf.nn.elu
 
@@ -19,7 +18,7 @@ activation = tf.nn.elu
 disc_conv_layers = ['c']
 disc_filter_shapes = [[4, 4]]
 disc_strides = [[1, 1]]
-disc_filter_nums = [24]
+disc_filter_nums = [8]
 disc_dense_layers = ['f']
 disc_dense_sizes = [1]
 disc_dropout_rates = [None]
@@ -30,9 +29,9 @@ gen_filter_shapes = []
 gen_strides = []
 gen_filter_nums = []
 gen_dense_layers = ['f', 'f']
-gen_dense_sizes = [128, 784]
+gen_dense_sizes = [32, 192]
 gen_dropout_rates = [None, None]
-latent_size = 32  # dimensionality of the noise for the generator
+latent_size = 16  # dimensionality of the noise for the generator
 noise_type = tf.random_normal  # distribution of the noise for the generator
 
 
@@ -63,8 +62,8 @@ def generator(in_layer, reuse):
                                            gen_filter_nums, activation, reuse)
     return out_layer
 
-training_input = tf.placeholder(tf.float32, [batch_size, image_size])
-cond_input = tf.placeholder(tf.float32, [batch_size, image_size])
+training_input = tf.placeholder(tf.float32, [batch_size, image_size*image_channels])
+cond_input = tf.placeholder(tf.float32, [batch_size, image_size*image_channels])
 gen_noise = noise_type([batch_size, latent_size])
 
 # get outputs of generator
@@ -109,27 +108,36 @@ with tf.name_scope("Adam_optimizer_gen"):
                for grad, tvar in grads_and_vars]
     train_step_gen = optimizer.apply_gradients(clipped, name="minimize_cost")
 
-# Running on MNIST at first, for testing
+batches = BatchLoader('./berkeley_patches', './berkeley_noise')
+
 with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
     for i in range(num_steps):
-        batch, _ = mnist.train.next_batch(batch_size)
+        batch_patches, batch_noise = batches.get_next_batch(batch_size)
 
-        # Sloppy temporary way of adding (masking) noise to each MNIST sample consistently (will remove this after building
-        # actual dataset of 8x8 patches)
-        noisy_batch = np.zeros([batch_size, image_size])
-        for j in range(batch_size):
-            seed_j = np.sum(batch[j, :]).astype(np.int64)
-            np.random.seed(seed_j)
-            noise = np.random.randint(2, size=image_size)
-            noisy_batch[j, :] = np.multiply(batch[j, :], noise)
+        batch_patches = np.array(batch_patches)
+        batch_noise = np.array(batch_noise)
+        batch_patches = np.reshape(batch_patches, (batch_size, -1))
+        batch_noise = np.reshape(batch_noise, (batch_size, -1))
+        batch_patches = batch_patches.astype(np.float32)
+        batch_noise = batch_noise.astype(np.float32)
+        batch_patches = batch_patches/255.
+        batch_noise = batch_noise/255.
 
-        # disc_minimize.run(feed_dict={training_input: batch, cond_input: noisy_batch})
-        # gen_minimize.run(feed_dict={cond_input: noisy_batch})
-        sess.run(train_step_disc, feed_dict={training_input: batch, cond_input: noisy_batch})
-        sess.run(train_step_gen, feed_dict={cond_input: noisy_batch})
+        sess.run(train_step_disc, feed_dict={training_input: batch_patches, cond_input: batch_noise})
+        sess.run(train_step_gen, feed_dict={cond_input: batch_noise})
         if i % 100 == 0:
-            current_disc_accuracy = disc_train_accuracy.eval(feed_dict={training_input: batch, cond_input: noisy_batch})
-            current_gen_accuracy = disc_gen_accuracy.eval(feed_dict={training_input: batch, cond_input: noisy_batch})
+            current_disc_accuracy = disc_train_accuracy.eval(feed_dict={training_input: batch_patches,
+                                                                        cond_input: batch_noise})
+            current_gen_accuracy = disc_gen_accuracy.eval(feed_dict={training_input: batch_patches,
+                                                                     cond_input: batch_noise})
             print('step {}, disc. train accuracy {:f}, disc. gen. accuracy {:f}'.format(i, current_disc_accuracy,
                                                                                         current_gen_accuracy))
+            # save a generated sample
+            samples = gen_output.eval(feed_dict = {cond_input: batch_noise})
+            samples = np.reshape(samples, (batch_size, image_height, image_width, image_channels))
+            noise_1 = np.reshape(batch_noise[0, :], (image_height, image_width, image_channels))
+            sample_1 = samples[0, :, :, :]
+            image = np.concatenate((sample_1, noise_1), axis=1)
+            image = Image.fromarray(np.uint8(image*255))
+            image.save(os.path.join('./generated_samples', "iteration_" + str(i) + ".jpg"), "JPEG")
