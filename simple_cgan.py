@@ -4,9 +4,13 @@ from batch_loader import BatchLoader
 from PIL import Image
 import os
 
+
+def leaky_relu(x):
+    return tf.maximum(x, leaky_relu_alpha*x)
+
 # parameters
 batch_size = 64
-num_steps = 5000
+num_steps = 20000
 image_height = 8
 image_width = 8
 image_channels = 3
@@ -20,29 +24,23 @@ leaky_relu_alpha = 0.2
 training_input = tf.placeholder(tf.float32, [batch_size, image_height, image_width, image_channels])
 cond_input = tf.placeholder(tf.float32, [batch_size, image_height, image_width, image_channels])
 
-# for batch normalization
-data_mean = tf.placeholder(tf.float32)
-data_var = tf.placeholder(tf.float32)
-
 # get outputs of generator
 gen_noise = noise_type([batch_size, latent_size])
 gen_input = tf.concat([gen_noise, tf.reshape(cond_input, [batch_size, -1])], 1)
 with tf.variable_scope('gen'):
     # map input linearly and reshape to 4x4x32
-    gen_1_matmul = tf.layers.dense(gen_input, 4*4*32, activation=None)
+    # for some reason running xavier initializer gives errors. I switched to truncated normal for now since I didn't
+    # feel like looking through tensorflow source code to try and fix the problem
+    gen_1_matmul = tf.layers.dense(gen_input, 4*4*32, activation=None, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
     gen_1_matmul = tf.reshape(gen_1_matmul, [batch_size, 4, 4, -1])
     gen_2_convt = tf.layers.conv2d_transpose(gen_1_matmul, filters=24, kernel_size=(4, 4), padding='same',
-                                             activation=tf.nn.relu)
+                                             activation=tf.nn.relu, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
     gen_3_convt = tf.layers.conv2d_transpose(gen_2_convt, filters=16, kernel_size=(4, 4), strides=(2, 2),
-                                             padding='same', activation=tf.nn.relu)
+                                             padding='same', activation=tf.nn.relu, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
     gen_4_convt = tf.layers.conv2d_transpose(gen_3_convt, filters=8, kernel_size=(4, 4), padding='same',
-                                             activation=tf.nn.relu)
+                                             activation=tf.nn.relu, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
     gen_output = tf.layers.conv2d_transpose(gen_4_convt, filters=3, kernel_size=(1, 1), padding='same',
-                                            activation=lambda x: 0.5*tf.nn.tanh(x) + 0.5)
-
-
-def leaky_relu(x):
-    return tf.maximum(x, leaky_relu_alpha*x)
+                                            activation=lambda x: 0.5*tf.nn.tanh(x) + 0.5, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
 
 # get outputs of discriminator
 disc_train_input = tf.concat([training_input, cond_input], 1)
@@ -52,13 +50,13 @@ disc_gen_input = tf.concat([gen_output, cond_input], 1)
 with tf.variable_scope('disc'):
     # output on training data
     disc_1_train_conv = tf.layers.conv2d(disc_train_input, filters=32, kernel_size=(4, 4), padding='same',
-                                         name="conv1", activation=leaky_relu)
+                                         name="conv1", activation=leaky_relu, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
     disc_2_train_conv = tf.layers.conv2d(disc_1_train_conv, filters=24, kernel_size=(4, 4), strides=(2, 2),
-                                         name="conv2", padding='same', activation=leaky_relu)
+                                         name="conv2", padding='same', activation=leaky_relu, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
     disc_3_train_conv = tf.layers.conv2d(disc_2_train_conv, filters=16, kernel_size=(4, 4), padding='same',
-                                         name="conv3", activation=leaky_relu)
+                                         name="conv3", activation=leaky_relu, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
     disc_train_output = tf.layers.conv2d(disc_3_train_conv, filters=3, kernel_size=(1, 1), padding='same',
-                                         name="out", activation=tf.nn.sigmoid)
+                                         name="out", activation=tf.nn.sigmoid, kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
     # output on generator
     disc_1_gen_conv = tf.layers.conv2d(disc_gen_input, filters=32, kernel_size=(4, 4), padding='same',
                                        name="conv1", activation=leaky_relu, reuse=True)
@@ -103,6 +101,8 @@ batches = BatchLoader('./berkeley_patches', './berkeley_noise')
 
 with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
+    saver = tf.train.Saver()
+    saver_gen = tf.train.Saver(gen_variables)
     for i in range(num_steps):
         batch_patches, batch_noise = batches.get_next_batch(batch_size)
 
@@ -115,7 +115,8 @@ with tf.Session() as sess:
 
         sess.run(disc_minimize, feed_dict={training_input: batch_patches, cond_input: batch_noise})
         sess.run(gen_minimize, feed_dict={cond_input: batch_noise})
-        if i % 500 == 0:
+        if i % 1000 == 0:
+            print("step %s" % i)
             current_disc_accuracy = disc_train_accuracy.eval(feed_dict={training_input: batch_patches,
                                                                         cond_input: batch_noise})
             current_gen_accuracy = disc_gen_accuracy.eval(feed_dict={training_input: batch_patches,
@@ -131,3 +132,9 @@ with tf.Session() as sess:
             image = np.maximum(image, 0)
             image = Image.fromarray(np.uint8(image*255))
             image.save(os.path.join('./generated_samples', "iteration_" + str(i) + ".jpg"), "JPEG")
+        if i % 10000 == 0 and i != 0:
+            save_path = saver.save(sess, "./saved_models/model", global_step=i)
+            print("saving model to %s" % save_path)
+    # save final generator separately for sampling
+    save_path_gen = saver_gen.save(sess, "./saved_models/generator.ckpt")
+    print("saving generator to %s" % save_path_gen)
