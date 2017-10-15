@@ -1,83 +1,73 @@
 import tensorflow as tf
-import nn_construction as nnc
 import numpy as np
 from batch_loader import BatchLoader
 from PIL import Image
 import os
 
 # parameters
-batch_size = 20
+batch_size = 64
 num_steps = 5000
 image_height = 8
 image_width = 8
 image_channels = 3
 image_size = image_height*image_width
-activation = tf.nn.relu
 
-# discriminator network architecture
-disc_conv_layers = ['c', 'c', 'c', 'c']
-disc_filter_shapes = [[4, 4], [4, 4], [4, 4], [1, 1]]
-disc_strides = [[1, 1], [2, 2], [2, 2], [2, 2]]
-disc_filter_nums = [8, 16, 16, 1]
-disc_dense_layers = []
-disc_dense_sizes = []
-disc_dropout_rates = []
-
-# generator network architecture
-gen_conv_layers = ['t', 't', 't']
-gen_filter_shapes = [[4, 4], [4, 4], [1, 1]]
-gen_strides = [[1, 1], [2, 2], [1, 1]]
-gen_filter_nums = [32, 16, 3]
-gen_dense_layers = []
-gen_dense_sizes = []
-gen_dropout_rates = []
 latent_size = 32  # dimensionality of the noise for the generator
 noise_type = tf.random_uniform  # distribution of the noise for the generator
 
+leaky_relu_alpha = 0.2
 
-# build discriminator, following convolutional layers with dense layers
-def discriminator(in_layer, reuse):
-    out_layer = in_layer
-    if len(disc_conv_layers) > 0:
-        out_layer = tf.reshape(out_layer, [batch_size, image_height, image_width, -1])
-        out_layer = nnc.build_conv_network(out_layer, disc_conv_layers, disc_filter_shapes, disc_strides,
-                                           disc_filter_nums, activation, reuse)
-    out_layer = tf.reshape(out_layer, [batch_size, -1])
-    if len(disc_dense_layers) > 0:
-        out_layer = nnc.build_dense_network(out_layer, disc_dense_layers, disc_dense_sizes,
-                                            disc_dropout_rates, activation, False, reuse)
-    return out_layer
+training_input = tf.placeholder(tf.float32, [batch_size, image_height, image_width, image_channels])
+cond_input = tf.placeholder(tf.float32, [batch_size, image_height, image_width, image_channels])
 
-
-# build generator, following dense layers with convolutional layers
-def generator(in_layer, reuse):
-    out_layer = in_layer
-    if len(gen_dense_layers) > 0:
-        out_layer = nnc.build_dense_network(out_layer, gen_dense_layers, gen_dense_sizes,
-                                            gen_dropout_rates, activation, False, reuse)
-    if len(gen_conv_layers) > 0:
-        # following convolutional GAN paper's recommendation to reshape to a small spatial extent with many channels
-        out_layer = tf.reshape(out_layer, [batch_size, 4, 4, -1])
-        out_layer = nnc.build_conv_network(out_layer, gen_conv_layers, gen_filter_shapes, gen_strides,
-                                           gen_filter_nums, activation, reuse)
-    out_layer = tf.reshape(out_layer, [batch_size, -1])
-    return out_layer
-
-training_input = tf.placeholder(tf.float32, [batch_size, image_size*image_channels])
-cond_input = tf.placeholder(tf.float32, [batch_size, image_size*image_channels])
-gen_noise = noise_type([batch_size, latent_size])
+# for batch normalization
+data_mean = tf.placeholder(tf.float32)
+data_var = tf.placeholder(tf.float32)
 
 # get outputs of generator
-gen_input = tf.concat([gen_noise, cond_input], 1)
+gen_noise = noise_type([batch_size, latent_size])
+gen_input = tf.concat([gen_noise, tf.reshape(cond_input, [batch_size, -1])], 1)
 with tf.variable_scope('gen'):
-    gen_output = tf.nn.sigmoid(generator(gen_input, False))
+    # map input linearly and reshape to 4x4x32
+    gen_1_matmul = tf.layers.dense(gen_input, 4*4*32, activation=None)
+    gen_1_matmul = tf.reshape(gen_1_matmul, [batch_size, 4, 4, -1])
+    gen_2_convt = tf.layers.conv2d_transpose(gen_1_matmul, filters=24, kernel_size=(4, 4), padding='same',
+                                             activation=tf.nn.relu)
+    gen_3_convt = tf.layers.conv2d_transpose(gen_2_convt, filters=16, kernel_size=(4, 4), strides=(2, 2),
+                                             padding='same', activation=tf.nn.relu)
+    gen_4_convt = tf.layers.conv2d_transpose(gen_3_convt, filters=8, kernel_size=(4, 4), padding='same',
+                                             activation=tf.nn.relu)
+    gen_output = tf.layers.conv2d_transpose(gen_4_convt, filters=3, kernel_size=(1, 1), padding='same',
+                                            activation=lambda x: 0.5*tf.nn.tanh(x) + 0.5)
+
+
+def leaky_relu(x):
+    return tf.maximum(x, leaky_relu_alpha*x)
 
 # get outputs of discriminator
 disc_train_input = tf.concat([training_input, cond_input], 1)
 disc_gen_input = tf.concat([gen_output, cond_input], 1)
+# disc_gen_input = tf.Print(disc_gen_input, [tf.shape(disc_gen_input)])
+# disc_train_input = tf.Print(disc_train_input, [tf.shape(disc_train_input)])
 with tf.variable_scope('disc'):
-    disc_train_output = tf.nn.sigmoid(discriminator(disc_train_input, False))
-    disc_gen_output = tf.nn.sigmoid(discriminator(disc_gen_input, True))
+    # output on training data
+    disc_1_train_conv = tf.layers.conv2d(disc_train_input, filters=32, kernel_size=(4, 4), padding='same',
+                                         name="conv1", activation=leaky_relu)
+    disc_2_train_conv = tf.layers.conv2d(disc_1_train_conv, filters=24, kernel_size=(4, 4), strides=(2, 2),
+                                         name="conv2", padding='same', activation=leaky_relu)
+    disc_3_train_conv = tf.layers.conv2d(disc_2_train_conv, filters=16, kernel_size=(4, 4), padding='same',
+                                         name="conv3", activation=leaky_relu)
+    disc_train_output = tf.layers.conv2d(disc_3_train_conv, filters=3, kernel_size=(1, 1), padding='same',
+                                         name="out", activation=tf.nn.sigmoid)
+    # output on generator
+    disc_1_gen_conv = tf.layers.conv2d(disc_gen_input, filters=32, kernel_size=(4, 4), padding='same',
+                                       name="conv1", activation=leaky_relu, reuse=True)
+    disc_2_gen_conv = tf.layers.conv2d(disc_1_gen_conv, filters=24, kernel_size=(4, 4), strides=(2, 2),
+                                       name="conv2", padding='same', activation=leaky_relu, reuse=True)
+    disc_3_gen_conv = tf.layers.conv2d(disc_2_gen_conv, filters=16, kernel_size=(4, 4), padding='same',
+                                       name="conv3", activation=leaky_relu, reuse=True)
+    disc_gen_output = tf.layers.conv2d(disc_3_gen_conv, filters=3, kernel_size=(1, 1), padding='same',
+                                       name="out", activation=tf.nn.sigmoid, reuse=True)
 
 disc_loss = -tf.reduce_mean(tf.log(disc_train_output) + tf.log(1. - disc_gen_output))
 gen_loss = -tf.reduce_mean(tf.log(disc_gen_output))
@@ -118,8 +108,6 @@ with tf.Session() as sess:
 
         batch_patches = np.array(batch_patches)
         batch_noise = np.array(batch_noise)
-        batch_patches = np.reshape(batch_patches, (batch_size, -1))
-        batch_noise = np.reshape(batch_noise, (batch_size, -1))
         batch_patches = batch_patches.astype(np.float32)
         batch_noise = batch_noise.astype(np.float32)
         batch_patches = batch_patches/255.
@@ -127,7 +115,7 @@ with tf.Session() as sess:
 
         sess.run(disc_minimize, feed_dict={training_input: batch_patches, cond_input: batch_noise})
         sess.run(gen_minimize, feed_dict={cond_input: batch_noise})
-        if i % 100 == 0:
+        if i % 500 == 0:
             current_disc_accuracy = disc_train_accuracy.eval(feed_dict={training_input: batch_patches,
                                                                         cond_input: batch_noise})
             current_gen_accuracy = disc_gen_accuracy.eval(feed_dict={training_input: batch_patches,
@@ -136,10 +124,10 @@ with tf.Session() as sess:
                                                                                         current_gen_accuracy))
             # save a generated sample
             samples = gen_output.eval(feed_dict = {cond_input: batch_noise})
-            samples = np.reshape(samples, (batch_size, image_height, image_width, image_channels))
-            noise_1 = np.reshape(batch_noise[0, :], (image_height, image_width, image_channels))
-            data_1 = np.reshape(batch_patches[0, :], (image_height, image_width, image_channels))
+            noise_1 = batch_noise[0, :, :, :]
+            data_1 = batch_patches[0, :, :, :]
             sample_1 = samples[0, :, :, :]
             image = np.concatenate((data_1, noise_1, sample_1), axis=1)
+            image = np.maximum(image, 0)
             image = Image.fromarray(np.uint8(image*255))
             image.save(os.path.join('./generated_samples', "iteration_" + str(i) + ".jpg"), "JPEG")
