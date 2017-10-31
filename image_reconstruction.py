@@ -3,67 +3,55 @@ import numpy as np
 from PIL import Image
 import os
 import matplotlib.image as mpimage
+from resid_conv_cgan import CGAN
+
+
+def count_in_directory(path, filename):
+    files = os.listdir(path)
+    return sum(1 for file in files if file.startswith(filename))
+
+image_height = 8
+image_width = 8
+image_channels = 3
+latent_size = 32  # dimensionality of the noise for the generator
+noise_type = tf.random_uniform  # distribution of the noise for the generator
+gen_init_shape = (4, 4, 32)
+gen_depth = 3
+gen_filter_sizes = [(4, 4), (4, 4), (4, 4)]
+gen_filter_nums = [32, 24, 16]
+gen_strides = [(1, 1), (2, 2), (1, 1)]
 
 noise_dev = 255./16.
 
-image_filename = './berkeley data/train/65074.jpg'
+# name of file in berkeley train directory
+file_num = '66075'
+image_filename = './berkeley data/train/%s.jpg' % file_num
 im = Image.open(image_filename)
 
 # crop for splitting into 8x8 patches
 init_width, init_height = im.size
-patches_w = init_width//8
-patches_h = init_height//8
-im_width = 8*patches_w
-im_height = 8*patches_h
+patches_w = init_width//image_width
+patches_h = init_height//image_height
+im_width = image_width*patches_w
+im_height = image_height*patches_h
 im = im.crop((0, 0, im_width, im_height))
 
+np.random.seed(1)
 array_im = mpimage.pil_to_array(im)
-normal_noise = np.random.normal(scale=noise_dev, size=(im_height, im_width, 3))
+normal_noise = np.random.normal(scale=noise_dev, size=(im_height, im_width, image_channels))
 array_noise = array_im + normal_noise
 array_noise = (1/255)*array_noise
 
-# build generator
-image_height = 8
-image_width = 8
-image_channels = 3
-image_size = image_height*image_width
-
-latent_size = 32  # dimensionality of the noise for the generator
-noise_type = tf.random_uniform  # distribution of the noise for the generator
-
-# since tensors included batch size during training tensorflow gets mad if the first dimension is omitted
-cond_input = tf.placeholder(tf.float32, [1, image_height, image_width, image_channels])
-
-# get outputs of generator
-gen_noise = noise_type([1, latent_size])
-# gen_noise = tf.placeholder(tf.float32, [1, latent_size])
-gen_input = tf.concat([gen_noise, tf.reshape(cond_input, [1, -1])], 1)
-with tf.variable_scope('gen'):
-    # map input linearly and reshape to 4x4x32
-    # for some reason running xavier initializer gives errors. I switched to truncated normal for now since I didn't
-    # feel like looking through tensorflow source code to try and fix the problem
-    gen_1_matmul = tf.layers.dense(gen_input, 4*4*32, activation=None, kernel_initializer=tf.truncated_normal_initializer)
-    gen_1_matmul = tf.reshape(gen_1_matmul, [1, 4, 4, -1])
-    gen_2_convt = tf.layers.conv2d_transpose(gen_1_matmul, filters=24, kernel_size=(4, 4), padding='same',
-                                             activation=tf.nn.relu, kernel_initializer=tf.truncated_normal_initializer)
-    gen_3_convt = tf.layers.conv2d_transpose(gen_2_convt, filters=16, kernel_size=(4, 4), strides=(2, 2),
-                                             padding='same', activation=tf.nn.relu, kernel_initializer=tf.truncated_normal_initializer)
-    gen_4_convt = tf.layers.conv2d_transpose(gen_3_convt, filters=8, kernel_size=(4, 4), padding='same',
-                                             activation=tf.nn.relu, kernel_initializer=tf.truncated_normal_initializer)
-    gen_output = tf.layers.conv2d_transpose(gen_4_convt, filters=3, kernel_size=(1, 1), padding='same',
-                                            activation=lambda x: 0.5*tf.nn.tanh(x) + 0.5, kernel_initializer=tf.truncated_normal_initializer)
+cgan = CGAN(image_height, image_width, image_channels, latent_size, noise_type, 0, None, None, None, None,
+            gen_init_shape, gen_depth, gen_filter_nums, gen_filter_sizes, gen_strides)
 
 reconstructed_image = np.zeros(array_noise.shape)
 with tf.Session() as sess:
-    saver = tf.train.Saver()
-    saver.restore(sess, './saved_models/generator.ckpt')
-
-    # fixed_noise = np.random.uniform(low=0., high=1., size=(1, latent_size))
+    cond_input, gen_output = cgan.generate(sess, './saved_models/generator')
 
     for i in range(patches_w):
         for j in range(patches_h):
             patch_ij = array_noise[(8*j):(8*j + 8), (8*i):(8*i + 8), :]
-            # sample_ij = gen_output.eval(feed_dict={cond_input: patch_ij[None, :], gen_noise: fixed_noise})
             sample_ij = gen_output.eval(feed_dict={cond_input: patch_ij[None, :]})
             reconstructed_image[(8*j):(8*j + 8), (8*i):(8*i + 8), :] = sample_ij
 
@@ -71,4 +59,5 @@ final_im = np.concatenate((array_im, 255*array_noise, 255*reconstructed_image), 
 final_im = np.maximum(final_im, 0)
 final_im = np.minimum(final_im, 255)
 final_im = Image.fromarray(np.uint8(final_im))
-final_im.save('./reconstructed_images/im_sample.jpg', "JPEG")
+final_im.save('./reconstructed_images_3/%s_%s.jpg'
+              % (file_num, count_in_directory('./reconstructed_images_3/', file_num) + 1), "JPEG")
