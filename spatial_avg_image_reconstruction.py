@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image
 import os
 import matplotlib.image as mpimage
-from resid_conv_cgan import CGAN
+from resid_conv_cgan_2 import CGAN
 
 
 def count_in_directory(path, filename):
@@ -15,19 +15,17 @@ patch_width = 8
 image_channels = 3
 latent_size = 32  # dimensionality of the noise for the generator
 noise_type = tf.random_uniform  # distribution of the noise for the generator
-gen_init_shape = (4, 4, 32)
-gen_depth = 3
-gen_filter_sizes = [(4, 4), (4, 4), (4, 4)]
-gen_filter_nums = [32, 24, 16]
-gen_strides = [(1, 1), (2, 2), (1, 1)]
+gen_depth = 4
+gen_filter_sizes = [(4, 4), (4, 4), (4, 4), (4, 4)]
+gen_filter_nums = [64, 64, 64, 64]
+gen_strides = [(1, 1), (1, 1), (1, 1), (1, 1)]
 
-noise_dev = 255./16.
+noise_dev = 255./8.
 
 # name of file in berkeley train directory
-file_num = '299091'
+file_num = '164074'
 image_filename = './berkeley data/train/%s.jpg' % file_num
 im = Image.open(image_filename)
-
 
 im_width, im_height = im.size
 
@@ -37,8 +35,8 @@ normal_noise = np.random.normal(scale=noise_dev, size=(im_height, im_width, imag
 array_noise = array_im + normal_noise
 array_noise = (1/255)*array_noise
 
-cgan = CGAN(patch_height, patch_width, image_channels, latent_size, noise_type, 0, None, None, None, None,
-            gen_init_shape, gen_depth, gen_filter_nums, gen_filter_sizes, gen_strides)
+cgan = CGAN(patch_height, patch_width, image_channels, noise_type, 0, None, None, None, None,
+            gen_depth, gen_filter_nums, gen_filter_sizes, gen_strides)
 
 reconstructed_image = np.zeros(array_noise.shape)
 with tf.Session() as sess:
@@ -54,5 +52,5 @@ final_im = np.concatenate((array_im, 255*array_noise, 255*reconstructed_image), 
 final_im = np.maximum(final_im, 0)
 final_im = np.minimum(final_im, 255)
 final_im = Image.fromarray(np.uint8(final_im))
-final_im.save('./reconstructed_images_3/avg_%s_%s.jpg'
-              % (file_num, count_in_directory('./reconstructed_images_3/', file_num) + 1), "JPEG")
+final_im.save('./in_progress_images/avg_%s_%s.jpg'
+              % (file_num, count_in_directory('./in_progress_images/', 'avg_' + str(file_num)) + 1), "JPEG")
