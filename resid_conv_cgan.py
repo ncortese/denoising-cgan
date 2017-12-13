@@ -4,14 +4,17 @@ from PIL import Image
 import os
 
 
+# parameter to avoid NaN errors in loss
+epsilon = 1e-10
+
+
 class CGAN:
-    def __init__(self, image_height, image_width, image_channels, latent_size, noise_type, leaky_relu_alpha, disc_depth,
-                 disc_filter_nums, disc_filter_sizes, disc_strides, gen_init_shape, gen_depth, gen_filter_nums,
+    def __init__(self, image_height, image_width, image_channels, noise_type, leaky_relu_alpha, disc_depth,
+                 disc_filter_nums, disc_filter_sizes, disc_strides, gen_depth, gen_filter_nums,
                  gen_filter_sizes, gen_strides):
         self.image_height = image_height
         self.image_width = image_width
         self.image_channels = image_channels
-        self.latent_size = latent_size
         self.noise_type = noise_type
 
         def leaky_relu(x):
@@ -22,28 +25,21 @@ class CGAN:
         self.disc_filter_nums = disc_filter_nums
         self.disc_filter_sizes = disc_filter_sizes
         self.disc_strides = disc_strides
-        self.gen_init_shape = gen_init_shape
         self.gen_depth = gen_depth
         self.gen_filter_nums = gen_filter_nums
         self.gen_filter_sizes = gen_filter_sizes
         self.gen_strides = gen_strides
 
-    def train(self, batch_loader, batch_size, num_steps, saved_checkpoint_path, saved_samples_path):
+    def train(self, batch_loader, batch_size, num_steps, saved_checkpoint_path, saved_samples_path, restore_from_prev, restore_num=-1):
         training_input = tf.placeholder(tf.float32, [batch_size, self.image_height, self.image_width, self.image_channels])
         cond_input = tf.placeholder(tf.float32, [batch_size, self.image_height, self.image_width, self.image_channels])
 
-        gen_noise = self.noise_type([batch_size, self.latent_size])
-        gen_input = tf.concat([gen_noise, tf.reshape(cond_input, [batch_size, -1])], 1)
+        gen_noise = self.noise_type([batch_size, self.image_height, self.image_width, 1])
+        gen_input = tf.concat([gen_noise, cond_input], 3)
 
         with tf.variable_scope('gen'):
-            gen_init_matmul = tf.layers.dense(gen_input,
-                                              self.gen_init_shape[0]*self.gen_init_shape[1]*self.gen_init_shape[2],
-                                              activation=None,
-                                              kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
-            gen_init_matmul = tf.reshape(gen_init_matmul, (batch_size,) + self.gen_init_shape)
-
             # iterate to compose generator layers
-            gen_layer = gen_init_matmul
+            gen_layer = gen_input
             for i in range(self.gen_depth):
                 gen_layer = tf.layers.conv2d_transpose(gen_layer, filters=self.gen_filter_nums[i],
                                                        kernel_size=self.gen_filter_sizes[i],
@@ -87,8 +83,8 @@ class CGAN:
                                                name="out", activation=tf.nn.sigmoid, reuse=True,
                                                kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
 
-        disc_loss = -tf.reduce_mean(tf.log(disc_train_output) + tf.log(1. - disc_gen_output))
-        gen_loss = -tf.reduce_mean(tf.log(disc_gen_output))
+        disc_loss = -tf.reduce_mean(tf.log(disc_train_output + epsilon) + tf.log(1. - disc_gen_output + epsilon))
+        gen_loss = -tf.reduce_mean(tf.log(disc_gen_output + epsilon))
 
         # to estimate progress
         disc_train_accuracy = tf.reduce_mean(disc_train_output)
@@ -98,15 +94,17 @@ class CGAN:
         disc_variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='disc')
         gen_variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='gen')
 
-        disc_minimize = tf.train.AdamOptimizer(learning_rate=2E-4, beta1=0.5).minimize(disc_loss,
+        disc_minimize = tf.train.AdamOptimizer(learning_rate=2E-5, beta1=0.5).minimize(disc_loss,
                                                                                        var_list=disc_variables)
-        gen_minimize = tf.train.AdamOptimizer(learning_rate=2E-4, beta1=0.5).minimize(gen_loss, var_list=gen_variables)
+        gen_minimize = tf.train.AdamOptimizer(learning_rate=2E-5, beta1=0.5).minimize(gen_loss, var_list=gen_variables)
 
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
             saver = tf.train.Saver()
             saver_gen = tf.train.Saver(gen_variables)
-            for i in range(num_steps):
+            if restore_from_prev:
+                saver.restore(sess, os.path.join(saved_checkpoint_path, "model-%s" % restore_num))
+            for i in range(restore_num+1, num_steps+restore_num+1):
                 batch_patches, batch_noise = batch_loader.get_next_batch(batch_size)
 
                 batch_patches = np.array(batch_patches)
@@ -136,28 +134,27 @@ class CGAN:
                     image = np.maximum(image, 0)
                     image = Image.fromarray(np.uint8(image * 255))
                     image.save(os.path.join(saved_samples_path, "iteration_" + str(i) + ".jpg"), "JPEG")
-                if i % 10000 == 0 and i != 0:
+                if (i + 1) % 2000 == 0:
                     save_path = saver.save(sess, os.path.join(saved_checkpoint_path, "model"), global_step=i)
                     print("saving model to %s" % save_path)
-            # save final generator separately for sampling
+
+                    # this is redundant with the above, but save it separately since that's how the image generator
+                    # functions take it
+                    save_path_gen = saver_gen.save(sess, os.path.join(saved_checkpoint_path, "generator"))
+                    print("saving generator to %s" % save_path_gen)
+            # save final generator
             save_path_gen = saver_gen.save(sess, os.path.join(saved_checkpoint_path, "generator"))
             print("saving generator to %s" % save_path_gen)
 
     def generate(self, tf_session, saved_generator_path):
         cond_input = tf.placeholder(tf.float32, [1, self.image_height, self.image_width, self.image_channels])
 
-        gen_noise = self.noise_type([1, self.latent_size])
-        gen_input = tf.concat([gen_noise, tf.reshape(cond_input, [1, -1])], 1)
+        gen_noise = self.noise_type([1, self.image_height, self.image_width, 1])
+        gen_input = tf.concat([gen_noise, cond_input], 3)
 
         with tf.variable_scope('gen'):
-            gen_init_matmul = tf.layers.dense(gen_input,
-                                              self.gen_init_shape[0]*self.gen_init_shape[1]*self.gen_init_shape[2],
-                                              activation=None,
-                                              kernel_initializer=tf.truncated_normal_initializer(stddev=0.2))
-            gen_init_matmul = tf.reshape(gen_init_matmul, (1,) + self.gen_init_shape)
-
             # iterate to compose generator layers
-            gen_layer = gen_init_matmul
+            gen_layer = gen_input
             for i in range(self.gen_depth):
                 gen_layer = tf.layers.conv2d_transpose(gen_layer, filters=self.gen_filter_nums[i],
                                                        kernel_size=self.gen_filter_sizes[i],
